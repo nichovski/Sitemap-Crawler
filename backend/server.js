@@ -34,12 +34,28 @@ async function followRedirects(url, options = {}) {
                 }
             });
 
+            let pageTitle = null;
+            let metaDescription = null;
+
+            if (response.headers['content-type']?.includes('text/html')) {
+                // Extract title from HTML content
+                const titleMatch = response.data.match(/<title[^>]*>([^<]+)<\/title>/i);
+                pageTitle = titleMatch ? titleMatch[1].trim() : null;
+
+                // Extract meta description
+                const metaMatch = response.data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["'][^>]*>/i) 
+                    || response.data.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["'][^>]*>/i);
+                metaDescription = metaMatch ? metaMatch[1].trim() : null;
+            }
+
             redirectChain.push({
                 url: currentUrl,
                 statusCode: response.status,
                 responseTime: Date.now() - startTime,
                 contentType: response.headers['content-type'],
-                contentLength: response.headers['content-length']
+                contentLength: response.headers['content-length'],
+                pageTitle: pageTitle,
+                metaDescription: metaDescription
             });
 
             if (response.status < 300 || response.status >= 400) {
