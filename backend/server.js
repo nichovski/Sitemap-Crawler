@@ -36,6 +36,11 @@ async function followRedirects(url, options = {}) {
 
             let pageTitle = null;
             let metaDescription = null;
+            let ogTags = {
+                hasOGImage: false,
+                hasOGTitle: false,
+                hasOGDescription: false
+            };
 
             if (response.headers['content-type']?.includes('text/html')) {
                 // Extract title from HTML content
@@ -43,9 +48,14 @@ async function followRedirects(url, options = {}) {
                 pageTitle = titleMatch ? titleMatch[1].trim() : null;
 
                 // Extract meta description
-                const metaMatch = response.data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["'][^>]*>/i) 
+                const metaMatch = response.data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["'][^>]*>/i)
                     || response.data.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["'][^>]*>/i);
                 metaDescription = metaMatch ? metaMatch[1].trim() : null;
+
+                // Extract OG tags
+                ogTags.hasOGImage = /<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i.test(response.data);
+                ogTags.hasOGTitle = /<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i.test(response.data);
+                ogTags.hasOGDescription = /<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i.test(response.data);
             }
 
             redirectChain.push({
@@ -55,7 +65,9 @@ async function followRedirects(url, options = {}) {
                 contentType: response.headers['content-type'],
                 contentLength: response.headers['content-length'],
                 pageTitle: pageTitle,
-                metaDescription: metaDescription
+                metaDescription: metaDescription,
+                ogTags: ogTags,
+                isHttps: currentUrl.startsWith('https://')
             });
 
             if (response.status < 300 || response.status >= 400) {
@@ -85,6 +97,95 @@ async function followRedirects(url, options = {}) {
     }
 
     return redirectChain;
+}
+
+function calculateScore(chain) {
+    let score = 0;
+    const breakdown = {};
+
+    if (chain.length === 0) return { total: 0, breakdown };
+
+    const finalStep = chain[chain.length - 1];
+
+    // Title optimization (10 points)
+    if (finalStep.pageTitle) {
+        const titleLength = finalStep.pageTitle.length;
+        if (titleLength >= 50 && titleLength <= 70) {
+            breakdown.title = 10;
+            score += 10;
+        } else {
+            breakdown.title = 5;
+            score += 5;
+        }
+    } else {
+        breakdown.title = 0;
+    }
+
+    // Meta description (10 points)
+    if (finalStep.metaDescription) {
+        const descLength = finalStep.metaDescription.length;
+        if (descLength >= 150 && descLength <= 160) {
+            breakdown.metaDescription = 10;
+            score += 10;
+        } else {
+            breakdown.metaDescription = 5;
+            score += 5;
+        }
+    } else {
+        breakdown.metaDescription = 0;
+    }
+
+    // Redirect chain (15 points)
+    const statusCode = finalStep.statusCode;
+    if (statusCode >= 400) {
+        breakdown.redirects = 0;
+    } else if (chain.length === 1) {
+        breakdown.redirects = 15;
+        score += 15;
+    } else if (chain.length === 2) {
+        breakdown.redirects = 10;
+        score += 10;
+    } else {
+        breakdown.redirects = 5;
+        score += 5;
+    }
+
+    // Response speed (15 points)
+    const responseTime = finalStep.responseTime;
+    if (responseTime < 500) {
+        breakdown.speed = 15;
+        score += 15;
+    } else if (responseTime < 1000) {
+        breakdown.speed = 10;
+        score += 10;
+    } else if (responseTime < 2000) {
+        breakdown.speed = 5;
+        score += 5;
+    } else {
+        breakdown.speed = 0;
+    }
+
+    // HTTPS (10 points)
+    if (finalStep.isHttps) {
+        breakdown.https = 10;
+        score += 10;
+    } else {
+        breakdown.https = 0;
+    }
+
+    // OG Tags (10 points)
+    const ogTags = finalStep.ogTags;
+    if (ogTags && ogTags.hasOGImage && ogTags.hasOGTitle && ogTags.hasOGDescription) {
+        breakdown.ogTags = 10;
+        score += 10;
+    } else if (ogTags && (ogTags.hasOGImage || ogTags.hasOGTitle || ogTags.hasOGDescription)) {
+        breakdown.ogTags = 5;
+        score += 5;
+    } else {
+        breakdown.ogTags = 0;
+    }
+
+    return { total: score, breakdown };
 }
 
 async function parseSitemap(url) {
@@ -213,6 +314,63 @@ app.post('/api/crawl-single', async (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ 
+            error: error.message,
+            details: error.response ? error.response.data : null
+        });
+    }
+});
+
+app.post('/api/battle', async (req, res) => {
+    const {
+        siteA,
+        siteB,
+        timeout = 10000,
+        maxRedirects = 10,
+        retries = 2
+    } = req.body;
+
+    if (!siteA || !siteB) {
+        return res.status(400).json({
+            error: 'Both siteA and siteB URLs are required'
+        });
+    }
+
+    try {
+        // Crawl both sites in parallel
+        const [chainA, chainB] = await Promise.all([
+            followRedirects(siteA, { maxRedirects, timeout, retries }),
+            followRedirects(siteB, { maxRedirects, timeout, retries })
+        ]);
+
+        // Calculate scores
+        const scoreA = calculateScore(chainA);
+        const scoreB = calculateScore(chainB);
+
+        // Determine winner
+        let winner = 'tie';
+        if (Math.abs(scoreA.total - scoreB.total) <= 10) {
+            winner = 'close';
+        } else if (scoreA.total > scoreB.total) {
+            winner = 'siteA';
+        } else {
+            winner = 'siteB';
+        }
+
+        res.json({
+            siteA: {
+                url: siteA,
+                chain: chainA,
+                score: scoreA
+            },
+            siteB: {
+                url: siteB,
+                chain: chainB,
+                score: scoreB
+            },
+            winner
+        });
+    } catch (error) {
+        res.status(500).json({
             error: error.message,
             details: error.response ? error.response.data : null
         });
