@@ -56,6 +56,19 @@ async function followRedirects(url, options = {}) {
                 ogTags.hasOGImage = /<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i.test(response.data);
                 ogTags.hasOGTitle = /<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i.test(response.data);
                 ogTags.hasOGDescription = /<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i.test(response.data);
+
+                // Extract H1 tag
+                var h1Match = response.data.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+                var h1Tag = h1Match ? h1Match[1].replace(/<[^>]+>/g, '').trim() : null;
+
+                // Extract canonical URL (handle both attribute orders)
+                var canonicalMatch = response.data.match(/<link[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["']/i)
+                    || response.data.match(/<link[^>]*href=["']([^"']+)["'][^>]*rel=["']canonical["']/i);
+                var canonicalUrl = canonicalMatch ? canonicalMatch[1].trim() : null;
+
+                // Count hreflang annotations
+                var hreflangMatches = response.data.match(/<link[^>]*rel=["']alternate["'][^>]*hreflang/gi);
+                var hreflangCount = hreflangMatches ? hreflangMatches.length : 0;
             }
 
             redirectChain.push({
@@ -67,7 +80,10 @@ async function followRedirects(url, options = {}) {
                 pageTitle: pageTitle,
                 metaDescription: metaDescription,
                 ogTags: ogTags,
-                isHttps: currentUrl.startsWith('https://')
+                isHttps: currentUrl.startsWith('https://'),
+                h1Tag: h1Tag || null,
+                canonicalUrl: canonicalUrl || null,
+                hreflangCount: hreflangCount || 0
             });
 
             if (response.status < 300 || response.status >= 400) {
@@ -183,6 +199,22 @@ function calculateScore(chain) {
         score += 5;
     } else {
         breakdown.ogTags = 0;
+    }
+
+    // H1 Tag (5 points)
+    if (finalStep.h1Tag && finalStep.h1Tag.length > 0) {
+        breakdown.h1 = 5;
+        score += 5;
+    } else {
+        breakdown.h1 = 0;
+    }
+
+    // Canonical URL (5 points)
+    if (finalStep.canonicalUrl) {
+        breakdown.canonical = 5;
+        score += 5;
+    } else {
+        breakdown.canonical = 0;
     }
 
     return { total: score, breakdown };

@@ -103,21 +103,37 @@ function SitemapCrawler() {
   const downloadCSV = () => {
     if (!results) return;
 
-    const csvRows = [['Original URL', 'Last Modified', 'Priority', 'Redirect Chain (URL -> Status -> Response Time)']];
-    
+    const escapeCSV = (value) => {
+      const str = String(value ?? '');
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const csvRows = [['Original URL', 'Last Modified', 'Priority', 'Page Title', 'Meta Description', 'H1 Tag', 'Canonical URL', 'Hreflang Count', 'SEO Issues', 'Redirect Chain (URL -> Status -> Response Time)']];
+
     results.results.forEach(result => {
+      const pageData = getFinalPageData(result.chain);
+      const seoIssues = getSeoIssues(result);
       const chainDescription = result.chain
         .map(step => `${step.url} (${step.statusCode}, ${step.responseTime}ms)`)
-        .join(' → ');
+        .join(' -> ');
       csvRows.push([
         result.originalUrl,
         result.lastModified || '',
         result.priority || '',
+        pageData.title || '',
+        pageData.description || '',
+        pageData.h1 || '',
+        pageData.canonicalUrl || '',
+        pageData.hreflangCount || 0,
+        seoIssues.map(i => i.message).join('; '),
         chainDescription
       ]);
     });
 
-    const csvContent = csvRows.map(row => row.join(',')).join('\n');
+    const csvContent = csvRows.map(row => row.map(escapeCSV).join(',')).join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -245,6 +261,76 @@ function SitemapCrawler() {
     return null;
   };
 
+  const getSeoIssues = useCallback((result) => {
+    const issues = [];
+    const finalStep = result.chain[result.chain.length - 1];
+
+    // Skip error pages
+    if (finalStep.statusCode >= 400) return issues;
+
+    const pageData = getFinalPageData(result.chain);
+
+    // H1 tag missing or empty
+    if (!pageData.h1 || pageData.h1.trim().length === 0) {
+      issues.push({ type: 'h1-missing', severity: 'high', category: 'Content', message: 'H1 tag missing or empty' });
+    }
+
+    // Title tag missing
+    if (!pageData.title) {
+      issues.push({ type: 'title-missing', severity: 'high', category: 'Content', message: 'Title tag missing' });
+    } else {
+      // Title too short
+      if (pageData.title.length < 30) {
+        issues.push({ type: 'title-short', severity: 'medium', category: 'Content', message: `Title too short (${pageData.title.length} chars, min 30)` });
+      }
+      // Title too long
+      if (pageData.title.length > 70) {
+        issues.push({ type: 'title-long', severity: 'medium', category: 'Content', message: `Title too long (${pageData.title.length} chars, max 70)` });
+      }
+    }
+
+    // Meta description missing
+    if (!pageData.description) {
+      issues.push({ type: 'desc-missing', severity: 'high', category: 'Content', message: 'Meta description missing' });
+    } else {
+      // Meta description too short
+      if (pageData.description.length < 50) {
+        issues.push({ type: 'desc-short', severity: 'medium', category: 'Content', message: `Meta description too short (${pageData.description.length} chars, min 50)` });
+      }
+      // Meta description too long
+      if (pageData.description.length > 160) {
+        issues.push({ type: 'desc-long', severity: 'medium', category: 'Content', message: `Meta description too long (${pageData.description.length} chars, max 160)` });
+      }
+    }
+
+    // Canonical tag missing
+    if (!pageData.canonicalUrl) {
+      issues.push({ type: 'canonical-missing', severity: 'medium', category: 'Technical', message: 'Canonical tag missing' });
+    }
+
+    // Hreflang annotations missing
+    if (pageData.hreflangCount === 0) {
+      issues.push({ type: 'hreflang-missing', severity: 'low', category: 'Localization', message: 'Hreflang annotations missing' });
+    }
+
+    // OG tags incomplete
+    const ogTags = pageData.ogTags;
+    if (!ogTags || !ogTags.hasOGImage || !ogTags.hasOGTitle || !ogTags.hasOGDescription) {
+      const missing = [];
+      if (!ogTags?.hasOGTitle) missing.push('og:title');
+      if (!ogTags?.hasOGDescription) missing.push('og:description');
+      if (!ogTags?.hasOGImage) missing.push('og:image');
+      issues.push({ type: 'og-incomplete', severity: 'low', category: 'Social', message: `OG tags incomplete (missing: ${missing.join(', ')})` });
+    }
+
+    // Not HTTPS
+    if (pageData.isHttps === false) {
+      issues.push({ type: 'not-https', severity: 'high', category: 'Security', message: 'Not using HTTPS' });
+    }
+
+    return issues;
+  }, []);
+
   const getSeverityColor = (severity) => {
     switch (severity) {
       case 'critical':
@@ -277,9 +363,9 @@ function SitemapCrawler() {
   const getFinalPageData = (chain) => {
     // Get the data from the last successful response in the chain
     for (let i = chain.length - 1; i >= 0; i--) {
-      if (chain[i].pageTitle || chain[i].metaDescription) {
+      if (chain[i].pageTitle || chain[i].metaDescription || chain[i].h1Tag || chain[i].canonicalUrl) {
         const textarea = document.createElement('textarea');
-        
+
         // Decode title
         let title = null;
         if (chain[i].pageTitle) {
@@ -294,10 +380,25 @@ function SitemapCrawler() {
           description = textarea.value;
         }
 
-        return { title, description };
+        // Decode H1 tag
+        let h1 = null;
+        if (chain[i].h1Tag) {
+          textarea.innerHTML = chain[i].h1Tag;
+          h1 = textarea.value;
+        }
+
+        return {
+          title,
+          description,
+          h1,
+          canonicalUrl: chain[i].canonicalUrl || null,
+          hreflangCount: chain[i].hreflangCount || 0,
+          ogTags: chain[i].ogTags || null,
+          isHttps: chain[i].isHttps
+        };
       }
     }
-    return { title: null, description: null };
+    return { title: null, description: null, h1: null, canonicalUrl: null, hreflangCount: 0, ogTags: null, isHttps: true };
   };
 
   const getTitleColor = (title) => {
@@ -341,9 +442,8 @@ function SitemapCrawler() {
   };
 
   const hasSeoIssues = useCallback((result) => {
-    const { title, description } = getFinalPageData(result.chain);
-    return (title && title.length > 70) || (description && description.length > 160);
-  }, []);
+    return getSeoIssues(result).length > 0;
+  }, [getSeoIssues]);
 
   const getStatusCategory = (statusCode) => {
     if (statusCode >= 200 && statusCode < 300) return '2xx';
@@ -461,21 +561,34 @@ function SitemapCrawler() {
         'redirect-loop': 0,
         'long-redirect': 0,
         'other': 0
+      },
+      seoBreakdown: {
+        'h1-missing': 0,
+        'title-missing': 0,
+        'title-short': 0,
+        'title-long': 0,
+        'desc-missing': 0,
+        'desc-short': 0,
+        'desc-long': 0,
+        'canonical-missing': 0,
+        'hreflang-missing': 0,
+        'og-incomplete': 0,
+        'not-https': 0
       }
     };
-    
+
     results.results.forEach(result => {
       const finalStatus = result.chain[result.chain.length - 1].statusCode;
       const category = getStatusCategory(finalStatus);
       const issue = getIssueCategory(result);
-      
+
       if (category === '2xx') stats.success++;
       else if (category === '3xx') stats.redirects++;
       else if (category === '4xx') stats.clientErrors++;
       else if (category === '5xx') stats.serverErrors++;
-      
+
       if (hasSeoIssues(result)) stats.seoIssues++;
-      
+
       // Track issue breakdown
       if (issue) {
         if (issue.type in stats.issueBreakdown) {
@@ -484,10 +597,18 @@ function SitemapCrawler() {
           stats.issueBreakdown.other++;
         }
       }
+
+      // Track SEO issue breakdown
+      const seoIssues = getSeoIssues(result);
+      seoIssues.forEach(seoIssue => {
+        if (seoIssue.type in stats.seoBreakdown) {
+          stats.seoBreakdown[seoIssue.type]++;
+        }
+      });
     });
-    
+
     return stats;
-  }, [results, hasSeoIssues]);
+  }, [results, hasSeoIssues, getSeoIssues]);
 
   const clearAllFilters = () => {
     setSearchQuery('');
@@ -747,6 +868,117 @@ function SitemapCrawler() {
                 </div>
               )}
 
+              {/* SEO Issues Breakdown */}
+              {resultStats && resultStats.seoIssues > 0 && (
+                <div className="bg-white p-4 rounded-lg shadow-sm border border-yellow-200">
+                  <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                    <AlertCircle size={20} className="text-yellow-600" />
+                    SEO Issues Breakdown
+                  </h3>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {resultStats.seoBreakdown['h1-missing'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-orange-50 rounded border border-orange-200">
+                        <span className="text-xl">🔴</span>
+                        <div>
+                          <div className="font-bold text-orange-800">{resultStats.seoBreakdown['h1-missing']}</div>
+                          <div className="text-xs text-orange-600">H1 Missing</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['title-missing'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-orange-50 rounded border border-orange-200">
+                        <span className="text-xl">🔴</span>
+                        <div>
+                          <div className="font-bold text-orange-800">{resultStats.seoBreakdown['title-missing']}</div>
+                          <div className="text-xs text-orange-600">Title Missing</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['title-short'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-yellow-50 rounded border border-yellow-200">
+                        <span className="text-xl">🟡</span>
+                        <div>
+                          <div className="font-bold text-yellow-800">{resultStats.seoBreakdown['title-short']}</div>
+                          <div className="text-xs text-yellow-600">Title Too Short</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['title-long'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-yellow-50 rounded border border-yellow-200">
+                        <span className="text-xl">🟡</span>
+                        <div>
+                          <div className="font-bold text-yellow-800">{resultStats.seoBreakdown['title-long']}</div>
+                          <div className="text-xs text-yellow-600">Title Too Long</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['desc-missing'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-orange-50 rounded border border-orange-200">
+                        <span className="text-xl">🔴</span>
+                        <div>
+                          <div className="font-bold text-orange-800">{resultStats.seoBreakdown['desc-missing']}</div>
+                          <div className="text-xs text-orange-600">Description Missing</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['desc-short'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-yellow-50 rounded border border-yellow-200">
+                        <span className="text-xl">🟡</span>
+                        <div>
+                          <div className="font-bold text-yellow-800">{resultStats.seoBreakdown['desc-short']}</div>
+                          <div className="text-xs text-yellow-600">Description Too Short</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['desc-long'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-yellow-50 rounded border border-yellow-200">
+                        <span className="text-xl">🟡</span>
+                        <div>
+                          <div className="font-bold text-yellow-800">{resultStats.seoBreakdown['desc-long']}</div>
+                          <div className="text-xs text-yellow-600">Description Too Long</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['canonical-missing'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-yellow-50 rounded border border-yellow-200">
+                        <span className="text-xl">🟡</span>
+                        <div>
+                          <div className="font-bold text-yellow-800">{resultStats.seoBreakdown['canonical-missing']}</div>
+                          <div className="text-xs text-yellow-600">Canonical Missing</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['hreflang-missing'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-blue-50 rounded border border-blue-200">
+                        <span className="text-xl">🔵</span>
+                        <div>
+                          <div className="font-bold text-blue-800">{resultStats.seoBreakdown['hreflang-missing']}</div>
+                          <div className="text-xs text-blue-600">Hreflang Missing</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['og-incomplete'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-blue-50 rounded border border-blue-200">
+                        <span className="text-xl">🔵</span>
+                        <div>
+                          <div className="font-bold text-blue-800">{resultStats.seoBreakdown['og-incomplete']}</div>
+                          <div className="text-xs text-blue-600">OG Tags Incomplete</div>
+                        </div>
+                      </div>
+                    )}
+                    {resultStats.seoBreakdown['not-https'] > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-orange-50 rounded border border-orange-200">
+                        <span className="text-xl">🔴</span>
+                        <div>
+                          <div className="font-bold text-orange-800">{resultStats.seoBreakdown['not-https']}</div>
+                          <div className="text-xs text-orange-600">Not HTTPS</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Search and Filters */}
               <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200 space-y-4">
                 <div className="flex flex-col sm:flex-row gap-4">
@@ -972,10 +1204,12 @@ function SitemapCrawler() {
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
                       {filteredAndSortedResults.map((result, index) => {
-                        const { title: pageTitle, description: metaDescription } = getFinalPageData(result.chain);
+                        const pageData = getFinalPageData(result.chain);
+                        const { title: pageTitle, description: metaDescription } = pageData;
                         const isExpanded = expandedRows.has(index);
                         const hasErrorStatus = hasError(result);
                         const issue = getIssueCategory(result);
+                        const seoIssuesList = getSeoIssues(result);
 
                         return (
                           <React.Fragment key={index}>
@@ -1064,10 +1298,65 @@ function SitemapCrawler() {
                               <tr className={hasErrorStatus ? 'bg-red-50' : 'bg-white'}>
                                 <td colSpan="6" className="px-6 py-4">
                                   <div className="space-y-4">
+                                    {/* SEO Issues Tags */}
+                                    {seoIssuesList.length > 0 && (
+                                      <div>
+                                        <h4 className="text-sm font-medium text-gray-700 mb-2">SEO Issues</h4>
+                                        <div className="flex flex-wrap gap-2">
+                                          {seoIssuesList.map((seoIssue, idx) => (
+                                            <span
+                                              key={idx}
+                                              className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium border ${getSeverityColor(seoIssue.severity)}`}
+                                            >
+                                              {getSeverityIcon(seoIssue.severity)} {seoIssue.message}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Metadata Grid */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                                      <div>
+                                        <h4 className="text-sm font-medium text-gray-700 mb-1">H1 Tag</h4>
+                                        {pageData.h1 ? (
+                                          <p className="text-sm text-gray-600">{pageData.h1}</p>
+                                        ) : (
+                                          <p className="text-sm text-gray-400 italic">No H1 tag found</p>
+                                        )}
+                                      </div>
+                                      <div>
+                                        <h4 className="text-sm font-medium text-gray-700 mb-1">Canonical URL</h4>
+                                        {pageData.canonicalUrl ? (
+                                          <p className="text-sm text-gray-600 truncate" title={pageData.canonicalUrl}>{pageData.canonicalUrl}</p>
+                                        ) : (
+                                          <p className="text-sm text-gray-400 italic">No canonical tag found</p>
+                                        )}
+                                      </div>
+                                      <div>
+                                        <h4 className="text-sm font-medium text-gray-700 mb-1">Hreflang</h4>
+                                        <p className="text-sm text-gray-600">{pageData.hreflangCount > 0 ? `${pageData.hreflangCount} annotation(s)` : 'None found'}</p>
+                                      </div>
+                                      <div>
+                                        <h4 className="text-sm font-medium text-gray-700 mb-1">OG Tags</h4>
+                                        <p className="text-sm text-gray-600">
+                                          {pageData.ogTags ? (
+                                            <>
+                                              {pageData.ogTags.hasOGTitle ? 'Title ' : ''}{pageData.ogTags.hasOGDescription ? 'Desc ' : ''}{pageData.ogTags.hasOGImage ? 'Image' : ''}
+                                              {!pageData.ogTags.hasOGTitle && !pageData.ogTags.hasOGDescription && !pageData.ogTags.hasOGImage && <span className="text-gray-400 italic">None found</span>}
+                                            </>
+                                          ) : (
+                                            <span className="text-gray-400 italic">None found</span>
+                                          )}
+                                        </p>
+                                      </div>
+                                    </div>
+
+                                    {/* Meta Description */}
                                     <div>
                                       <h4 className="text-sm font-medium text-gray-700 mb-2">Meta Description</h4>
                                       {metaDescription ? (
-                                        <div 
+                                        <div
                                           className={`text-sm relative group ${getDescriptionColor(metaDescription)}`}
                                           title={getDescriptionTooltip(metaDescription)}
                                         >
