@@ -47,9 +47,11 @@ async function followRedirects(url, options = {}) {
                 const titleMatch = response.data.match(/<title[^>]*>([^<]+)<\/title>/i);
                 pageTitle = titleMatch ? titleMatch[1].trim() : null;
 
-                // Extract meta description
-                const metaMatch = response.data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["'][^>]*>/i)
-                    || response.data.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["'][^>]*>/i);
+                // Extract meta description (handle apostrophes in content)
+                const metaMatch = response.data.match(/<meta[^>]*name=["']description["'][^>]*content="([^"]*)"[^>]*>/i)
+                    || response.data.match(/<meta[^>]*name=["']description["'][^>]*content='([^']*)'[^>]*>/i)
+                    || response.data.match(/<meta[^>]*content="([^"]*)"[^>]*name=["']description["'][^>]*>/i)
+                    || response.data.match(/<meta[^>]*content='([^']*)'[^>]*name=["']description["'][^>]*>/i);
                 metaDescription = metaMatch ? metaMatch[1].trim() : null;
 
                 // Extract OG tags
