@@ -646,31 +646,13 @@ function SitemapCrawler() {
 
     let includedCount = 0;
     filteredAndSortedResults.forEach((result) => {
-      const { title, description } = getFinalPageData(result.chain);
+      const { title } = getFinalPageData(result.chain);
       const finalStep = result.chain[result.chain.length - 1];
       const issue = getIssueCategory(result);
-      const seoProblems = [];
-
-      if (title && title.length > 70) {
-        seoProblems.push(`Title too long (${title.length} chars, max 70)`);
-      }
-      if (!title) {
-        seoProblems.push('Missing page title');
-      }
-      if (description && description.length > 160) {
-        seoProblems.push(`Meta description too long (${description.length} chars, max 160)`);
-      }
-      if (!description) {
-        seoProblems.push('Missing meta description');
-      }
-      if (finalStep.ogTags) {
-        if (!finalStep.ogTags.hasOGTitle) seoProblems.push('Missing og:title');
-        if (!finalStep.ogTags.hasOGDescription) seoProblems.push('Missing og:description');
-        if (!finalStep.ogTags.hasOGImage) seoProblems.push('Missing og:image');
-      }
+      const seoIssues = getSeoIssues(result);
 
       // Only include URLs that have warnings (issues or SEO problems)
-      if (!issue && seoProblems.length === 0) return;
+      if (!issue && seoIssues.length === 0) return;
 
       includedCount++;
       lines.push(`## ${result.originalUrl}`);
@@ -682,9 +664,9 @@ function SitemapCrawler() {
       if (issue) {
         lines.push(`⚠ Issue: ${issue.message} (${issue.severity})`);
       }
-      if (seoProblems.length > 0) {
+      if (seoIssues.length > 0) {
         lines.push(`SEO problems:`);
-        seoProblems.forEach(p => lines.push(`  - ${p}`));
+        seoIssues.forEach(i => lines.push(`  - ${i.message}`));
       }
       lines.push('');
     });
@@ -695,7 +677,7 @@ function SitemapCrawler() {
     }
 
     return lines.join('\n');
-  }, [filteredAndSortedResults, url, results, showErrorsOnly, showSeoIssuesOnly, statusFilters, searchQuery]);
+  }, [filteredAndSortedResults, url, results, showErrorsOnly, showSeoIssuesOnly, statusFilters, searchQuery, getSeoIssues]);
 
   const handleCopySummary = async () => {
     const summary = generateSummary();
