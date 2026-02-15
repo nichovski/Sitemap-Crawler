@@ -132,7 +132,7 @@ function SEOBattle() {
     setResults(null);
 
     try {
-      const response = await fetch('http://localhost:3001/api/battle', {
+      const response = await fetch('/api/battle', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

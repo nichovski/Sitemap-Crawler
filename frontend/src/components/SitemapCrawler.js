@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { Download, Loader2, ArrowRight, Settings, RefreshCw, ChevronDown, ChevronUp, ArrowUpDown, AlertCircle, Search, X, Filter } from 'lucide-react';
+import { Download, Loader2, ArrowRight, Settings, RefreshCw, ChevronDown, ChevronUp, ArrowUpDown, AlertCircle, Search, X, Filter, ClipboardCopy, Check } from 'lucide-react';
 
 function SitemapCrawler() {
   const [url, setUrl] = useState('');
@@ -26,6 +26,21 @@ function SitemapCrawler() {
     '5xx': false
   });
   const [showFilters, setShowFilters] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const normalizeSitemapUrl = (input) => {
+    let normalized = input.trim();
+    // Add https:// if no protocol
+    if (!/^https?:\/\//i.test(normalized)) {
+      normalized = 'https://' + normalized;
+    }
+    // If it doesn't end with .xml, assume it's a domain and append /sitemap.xml
+    if (!/\.xml(\?.*)?$/i.test(normalized)) {
+      normalized = normalized.replace(/\/+$/, '');
+      normalized += '/sitemap.xml';
+    }
+    return normalized;
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -34,14 +49,18 @@ function SitemapCrawler() {
     setResults(null);
     setExpandedRows(new Set());
 
+    const normalizedUrl = normalizeSitemapUrl(url);
+    // Update the input so the user sees what we resolved
+    setUrl(normalizedUrl);
+
     try {
-      const response = await fetch('http://localhost:3001/api/crawl', {
+      const response = await fetch('/api/crawl', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ 
-          sitemapUrl: url,
+          sitemapUrl: normalizedUrl,
           ...options
         }),
       });
@@ -65,7 +84,7 @@ function SitemapCrawler() {
     setRetryingUrls(prev => new Set([...prev, urlToRetry]));
     
     try {
-      const response = await fetch('http://localhost:3001/api/crawl-single', {
+      const response = await fetch('/api/crawl-single', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -610,6 +629,82 @@ function SitemapCrawler() {
     return stats;
   }, [results, hasSeoIssues, getSeoIssues]);
 
+  const generateSummary = useCallback(() => {
+    if (!filteredAndSortedResults.length) return '';
+
+    const lines = [];
+    const activeFilters = [];
+    if (showErrorsOnly) activeFilters.push('Redirects & Errors');
+    if (showSeoIssuesOnly) activeFilters.push('SEO Issues');
+    const activeStatusFilters = Object.keys(statusFilters).filter(k => statusFilters[k]);
+    if (activeStatusFilters.length) activeFilters.push(`Status: ${activeStatusFilters.join(', ')}`);
+    if (searchQuery.trim()) activeFilters.push(`Search: "${searchQuery}"`);
+
+    lines.push(`# Sitemap Crawl Report — ${url}`);
+    lines.push(`Showing ${filteredAndSortedResults.length} of ${results?.total || 0} URLs${activeFilters.length ? ` (Filters: ${activeFilters.join(', ')})` : ''}`);
+    lines.push('');
+
+    filteredAndSortedResults.forEach((result) => {
+      const { title, description } = getFinalPageData(result.chain);
+      const finalStep = result.chain[result.chain.length - 1];
+      const issue = getIssueCategory(result);
+      const seoProblems = [];
+
+      if (title && title.length > 70) {
+        seoProblems.push(`Title too long (${title.length} chars, max 70)`);
+      }
+      if (!title) {
+        seoProblems.push('Missing page title');
+      }
+      if (description && description.length > 160) {
+        seoProblems.push(`Meta description too long (${description.length} chars, max 160)`);
+      }
+      if (!description) {
+        seoProblems.push('Missing meta description');
+      }
+      if (finalStep.ogTags) {
+        if (!finalStep.ogTags.hasOGTitle) seoProblems.push('Missing og:title');
+        if (!finalStep.ogTags.hasOGDescription) seoProblems.push('Missing og:description');
+        if (!finalStep.ogTags.hasOGImage) seoProblems.push('Missing og:image');
+      }
+
+      lines.push(`## ${result.originalUrl}`);
+      if (title) lines.push(`Title: ${title}`);
+      lines.push(`Status: ${finalStep.statusCode} | Response: ${finalStep.responseTime}ms`);
+      if (result.chain.length > 1) {
+        lines.push(`Redirect chain: ${result.chain.map(s => `${s.statusCode}`).join(' → ')}`);
+      }
+      if (issue) {
+        lines.push(`⚠ Issue: ${issue.message} (${issue.severity})`);
+      }
+      if (seoProblems.length > 0) {
+        lines.push(`SEO problems:`);
+        seoProblems.forEach(p => lines.push(`  - ${p}`));
+      }
+      lines.push('');
+    });
+
+    return lines.join('\n');
+  }, [filteredAndSortedResults, url, results, showErrorsOnly, showSeoIssuesOnly, statusFilters, searchQuery]);
+
+  const handleCopySummary = async () => {
+    const summary = generateSummary();
+    try {
+      await navigator.clipboard.writeText(summary);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = summary;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
   const clearAllFilters = () => {
     setSearchQuery('');
     setStatusFilters({
@@ -655,13 +750,16 @@ function SitemapCrawler() {
               </label>
               <input
                 id="sitemap-url"
-                type="url"
+                type="text"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com/sitemap.xml"
+                placeholder="swarmtix.com or https://example.com/sitemap.xml"
                 className="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
                 required
               />
+              <p className="text-xs text-gray-500 mt-1">
+                Enter a domain (e.g. swarmtix.com) or full sitemap URL. We'll auto-detect the sitemap.
+              </p>
             </div>
 
             <div className="border-t pt-4">
@@ -1018,6 +1116,19 @@ function SitemapCrawler() {
                         {Object.values(statusFilters).filter(v => v).length + (showErrorsOnly ? 1 : 0) + (showSeoIssuesOnly ? 1 : 0)}
                       </span>
                     )}
+                  </button>
+
+                  {/* Copy Summary Button */}
+                  <button
+                    onClick={handleCopySummary}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors shadow-sm ${
+                      copied
+                        ? 'bg-green-600 text-white'
+                        : 'bg-purple-600 text-white hover:bg-purple-700'
+                    }`}
+                  >
+                    {copied ? <Check size={18} /> : <ClipboardCopy size={18} />}
+                    {copied ? 'Copied!' : 'Copy Summary'}
                   </button>
 
                   {/* Export Button */}

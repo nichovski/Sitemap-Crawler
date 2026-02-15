@@ -220,24 +220,34 @@ function calculateScore(chain) {
     return { total: score, breakdown };
 }
 
-async function parseSitemap(url) {
+async function fetchSitemapResponse(url) {
     const response = await axios.get(url, {
         headers: {
             'User-Agent': 'SitemapCrawler/1.0'
-        }
+        },
+        timeout: 15000,
+        validateStatus: (status) => status < 400
     });
-    
-    const contentType = response.headers['content-type'];
+    return response;
+}
+
+async function parseSitemapResponse(response) {
+    const contentType = response.headers['content-type'] || '';
     let urls = [];
 
-    if (contentType.includes('xml')) {
-        const result = await parseStringPromise(response.data);
+    // Try XML parsing if content looks like XML (by content-type or content)
+    const dataStr = typeof response.data === 'string' ? response.data : '';
+    const looksLikeXml = contentType.includes('xml') || dataStr.trimStart().startsWith('<?xml') || dataStr.trimStart().startsWith('<urlset') || dataStr.trimStart().startsWith('<sitemapindex');
+
+    if (looksLikeXml) {
+        const result = await parseStringPromise(dataStr);
 
         // Handle sitemap index files
         if (result.sitemapindex) {
             const sitemapUrls = result.sitemapindex.sitemap.map(entry => entry.loc[0]);
             for (const sitemapUrl of sitemapUrls) {
-                const subUrls = await parseSitemap(sitemapUrl);
+                const subResponse = await fetchSitemapResponse(sitemapUrl);
+                const subUrls = await parseSitemapResponse(subResponse);
                 urls.push(...subUrls);
             }
         } 
@@ -251,13 +261,66 @@ async function parseSitemap(url) {
         }
     } else if (contentType.includes('text/plain')) {
         // Handle text-based sitemaps
-        urls = response.data
+        urls = dataStr
             .split('\n')
             .filter(line => line.trim())
             .map(url => ({ loc: url.trim() }));
     }
 
     return urls;
+}
+
+async function parseSitemap(url) {
+    // Extract base URL for trying alternative paths
+    let baseUrl;
+    try {
+        const parsed = new URL(url);
+        baseUrl = `${parsed.protocol}//${parsed.host}`;
+    } catch {
+        throw new Error(`Invalid URL: ${url}`);
+    }
+
+    // Try the given URL first, then common alternatives
+    const urlsToTry = [url];
+    
+    // If the URL ends with /sitemap.xml, also try common alternatives
+    if (url.endsWith('/sitemap.xml')) {
+        urlsToTry.push(
+            `${baseUrl}/sitemap_index.xml`,
+            `${baseUrl}/wp-sitemap.xml`,
+            `${baseUrl}/sitemap.xml.gz`
+        );
+    }
+
+    let lastError = null;
+    for (const tryUrl of urlsToTry) {
+        try {
+            const response = await fetchSitemapResponse(tryUrl);
+            const urls = await parseSitemapResponse(response);
+            if (urls.length > 0) {
+                return urls;
+            }
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    throw lastError || new Error(`No sitemap found. Tried: ${urlsToTry.join(', ')}`);
+}
+
+function normalizeSitemapUrl(input) {
+    let url = input.trim();
+    // Add https:// if no protocol
+    if (!/^https?:\/\//i.test(url)) {
+        url = 'https://' + url;
+    }
+    // If it doesn't end with .xml, assume it's a domain and append /sitemap.xml
+    if (!/\.xml(\?.*)?$/i.test(url)) {
+        // Remove trailing slash if present
+        url = url.replace(/\/+$/, '');
+        url += '/sitemap.xml';
+    }
+    return url;
 }
 
 app.post('/api/crawl', async (req, res) => {
@@ -270,8 +333,11 @@ app.post('/api/crawl', async (req, res) => {
     } = req.body;
 
     try {
+        // Normalize the URL (add protocol, append /sitemap.xml if needed)
+        const normalizedUrl = normalizeSitemapUrl(sitemapUrl);
+
         // Extract URLs from sitemap
-        const urls = await parseSitemap(sitemapUrl);
+        const urls = await parseSitemap(normalizedUrl);
         
         // Set up concurrency limit
         const limit = pLimit(concurrency);
@@ -316,8 +382,24 @@ app.post('/api/crawl', async (req, res) => {
             results: crawlResults
         });
     } catch (error) {
+        const statusCode = error.response?.status;
+        let userMessage = error.message;
+        const triedUrl = normalizeSitemapUrl(sitemapUrl);
+        
+        if (statusCode === 404) {
+            userMessage = `Sitemap not found at ${triedUrl}. Make sure the site has a sitemap.xml file.`;
+        } else if (statusCode === 403 || statusCode === 401) {
+            userMessage = `Access denied when fetching sitemap. The site may be blocking automated requests.`;
+        } else if (statusCode === 429) {
+            userMessage = `Rate limited by the server. Please wait a moment and try again.`;
+        } else if (error.code === 'ENOTFOUND') {
+            userMessage = `Domain not found. Please check the URL and try again.`;
+        } else if (error.code === 'ECONNREFUSED') {
+            userMessage = `Could not connect to the server. The site may be down.`;
+        }
+        
         res.status(500).json({ 
-            error: error.message,
+            error: userMessage,
             details: error.response ? error.response.data : null
         });
     }
@@ -409,7 +491,7 @@ app.post('/api/battle', async (req, res) => {
     }
 });
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3010;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
