@@ -646,7 +646,7 @@ function SitemapCrawler() {
 
     let includedCount = 0;
     filteredAndSortedResults.forEach((result) => {
-      const { title } = getFinalPageData(result.chain);
+      const { title, description } = getFinalPageData(result.chain);
       const finalStep = result.chain[result.chain.length - 1];
       const issue = getIssueCategory(result);
       const seoIssues = getSeoIssues(result);
@@ -657,6 +657,7 @@ function SitemapCrawler() {
       includedCount++;
       lines.push(`## ${result.originalUrl}`);
       if (title) lines.push(`Title: ${title}`);
+      if (description) lines.push(`Meta: ${description}`);
       lines.push(`Status: ${finalStep.statusCode} | Response: ${finalStep.responseTime}ms`);
       if (result.chain.length > 1) {
         lines.push(`Redirect chain: ${result.chain.map(s => `${s.statusCode}`).join(' → ')}`);
