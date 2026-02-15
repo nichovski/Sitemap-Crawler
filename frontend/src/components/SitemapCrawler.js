@@ -644,6 +644,7 @@ function SitemapCrawler() {
     lines.push(`Showing ${filteredAndSortedResults.length} of ${results?.total || 0} URLs${activeFilters.length ? ` (Filters: ${activeFilters.join(', ')})` : ''}`);
     lines.push('');
 
+    let includedCount = 0;
     filteredAndSortedResults.forEach((result) => {
       const { title, description } = getFinalPageData(result.chain);
       const finalStep = result.chain[result.chain.length - 1];
@@ -668,6 +669,10 @@ function SitemapCrawler() {
         if (!finalStep.ogTags.hasOGImage) seoProblems.push('Missing og:image');
       }
 
+      // Only include URLs that have warnings (issues or SEO problems)
+      if (!issue && seoProblems.length === 0) return;
+
+      includedCount++;
       lines.push(`## ${result.originalUrl}`);
       if (title) lines.push(`Title: ${title}`);
       lines.push(`Status: ${finalStep.statusCode} | Response: ${finalStep.responseTime}ms`);
@@ -683,6 +688,11 @@ function SitemapCrawler() {
       }
       lines.push('');
     });
+
+    if (includedCount === 0) {
+      lines.push('No warnings found — all URLs look good! ✅');
+      lines.push('');
+    }
 
     return lines.join('\n');
   }, [filteredAndSortedResults, url, results, showErrorsOnly, showSeoIssuesOnly, statusFilters, searchQuery]);
